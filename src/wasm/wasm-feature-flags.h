@@ -48,7 +48,7 @@
   /* https://github.com/WebAssembly/JS-BigInt-integration */                   \
   /* V8 side owner: ahaas, ssauleau@igalia.com */                              \
   /* Staged in v7.9. */                                                        \
-  V(bigint, "JS BigInt support", false)                                        \
+  V(bigint, "JS BigInt support", true)                                        \
                                                                                \
   /* Multi-value proposal. */                                                  \
   /* https://github.com/WebAssembly/multi-value */                             \
