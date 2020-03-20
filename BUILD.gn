@@ -2137,6 +2137,8 @@ v8_source_set("v8_base_without_compiler") {
     "src/api/api-natives.h",
     "src/api/api.cc",
     "src/api/api.h",
+    "src/api/ext-api.cc",
+    "src/api/ext-api.h",
     "src/asmjs/asm-js.cc",
     "src/asmjs/asm-js.h",
     "src/asmjs/asm-names.h",
