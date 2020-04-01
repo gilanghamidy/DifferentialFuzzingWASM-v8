@@ -11,6 +11,9 @@
 #include "src/objects/objects.h"
 #include "src/handles/handles.h"
 #include "src/handles/handles-inl.h"
+#include "src/wasm/wasm-module-builder.h"
+#include "test/fuzzer/fuzzer-support.h"
+#include "test/fuzzer/wasm-fuzzer-common.h"
 #include <iostream>
 #include <algorithm>
 #include <string>
@@ -23,6 +26,7 @@ void v8::ext::HelloDarling() {
 
 struct v8::ext::CompiledWasmFunction::Internal {
   i::Handle<i::WasmExternalFunction> function_handle;
+  i::Handle<i::WasmModuleObject> compiled_module;
 };
 
 v8::ext::CompiledWasmFunction::CompiledWasmFunction() {
@@ -36,22 +40,29 @@ v8::ext::CompiledWasmFunction& v8::ext::CompiledWasmFunction::operator=(v8::ext:
   this->internal = that.internal;
   that.internal = nullptr;
 
+  this->func_index = that.func_index;
+
   return *this;
 }
 
 v8::ext::CompiledWasmFunction::CompiledWasmFunction(CompiledWasmFunction const& that) {
   this->internal = new Internal;
   this->internal->function_handle = that.internal->function_handle;
+  this->internal->compiled_module = that.internal->compiled_module;
+  this->func_index = that.func_index;
 }
 
 v8::ext::CompiledWasmFunction& v8::ext::CompiledWasmFunction::operator=(CompiledWasmFunction const& that) {
   this->internal->function_handle = that.internal->function_handle;
+  this->internal->compiled_module = that.internal->compiled_module;
+  this->func_index = that.func_index;
   return *this;
 }
 
 v8::ext::CompiledWasmFunction::CompiledWasmFunction(CompiledWasmFunction&& that) {
   this->internal = that.internal;
   that.internal = nullptr;
+  this->func_index = that.func_index;
 }
 
 v8::ext::CompiledWasmFunction::~CompiledWasmFunction() {
@@ -59,7 +70,19 @@ v8::ext::CompiledWasmFunction::~CompiledWasmFunction() {
     delete this->internal;
 }
 
-v8::MaybeLocal<v8::Value> v8::ext::CompiledWasmFunction::Invoke(v8::Isolate* i, std::vector<Local<Value>>& args) const {
+std::vector<uint8_t> v8::ext::CompiledWasmFunction::Instructions() const {
+  i::wasm::WasmCodeRefScope ref_scope;
+  auto wasm_code = this->internal->compiled_module->native_module()->GetCode(this->func_index);
+  
+  // Marshall out the data
+  std::vector<uint8_t> ret;
+  size_t len = wasm_code->instructions().length();
+  ret.resize(len);
+  std::memcpy(ret.data(), wasm_code->instructions().data(), len);
+  return ret;
+}
+
+v8::MaybeLocal<v8::Value> V8_EXPORT v8::ext::CompiledWasmFunction::Invoke(v8::Isolate* i, std::vector<Local<Value>>& args) const {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(i);
   i::Handle<i::Object> undefined = isolate->factory()->undefined_value();
   i::MaybeHandle<i::Object> retval =
@@ -105,8 +128,13 @@ v8::Maybe<v8::ext::CompiledWasm> v8::ext::CompileBinaryWasm(v8::Isolate* i, cons
                 wasm_engine->SyncCompile(isolate, enabled_features,
                                          &interpreter_thrower, wire_bytes);
   i::FLAG_liftoff = prev;
-  if(compiled_module_res.is_null())
+
+  if(compiled_module_res.is_null()) {
+    std::cerr << "ERROR: " << interpreter_thrower.error_msg() << "\n";
     return v8::Nothing<v8::ext::CompiledWasm>();
+  }
+    
+
   auto compiled_module = compiled_module_res.ToHandleChecked();
 
   // Instantiate the module
@@ -123,10 +151,9 @@ v8::Maybe<v8::ext::CompiledWasm> v8::ext::CompileBinaryWasm(v8::Isolate* i, cons
   v8::ext::CompiledWasm ret;
 
   {
-    i::wasm::WasmCodeRefScope ref_scope;
     i::wasm::ModuleWireBytes module_bytes(compiled_module->native_module()->wire_bytes());
     auto& export_table = compiled_module->module()->export_table;
-    ret.functions.resize(export_table.size());
+    //ret.functions.resize(export_table.size());
 
     for(auto& exported : export_table) {
       auto name = module_bytes.GetNameOrNull(exported.name);
@@ -136,8 +163,10 @@ v8::Maybe<v8::ext::CompiledWasm> v8::ext::CompileBinaryWasm(v8::Isolate* i, cons
               i::WasmInstanceObject::GetOrCreateWasmExternalFunction(isolate, module_instance, exported.index);
 
       CompiledWasmFunction func;
+      func.func_index = exported.index;
+      func.internal->compiled_module = compiled_module;
       func.internal->function_handle = the_function;
-      ret.functions[exported.index] = std::move(func);
+      ret.functions.emplace_back(std::move(func));
     }
 
     /*
@@ -164,4 +193,37 @@ v8::Maybe<v8::ext::CompiledWasm> v8::ext::CompileBinaryWasm(v8::Isolate* i, cons
   }
 
   return v8::Just<v8::ext::CompiledWasm>(ret);
+}
+
+bool v8::ext::GenerateRandomWasm(v8::Isolate* i, std::vector<uint8_t> const& input, std::vector<uint8_t>& output) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(i);
+
+  // Wrap the vector
+  i::Vector<const uint8_t> data { input.data(), input.size() };
+  
+  i::AccountingAllocator allocator;
+  i::Zone zone(&allocator, ZONE_NAME);
+
+  i::wasm::ZoneBuffer buffer(&zone);
+  int32_t num_args = 0;
+
+  std::unique_ptr<i::wasm::WasmValue[]> interpreter_args;
+  std::unique_ptr<i::Handle<i::Object>[]> compiler_args;
+  // The first byte builds the bitmask to control which function will be
+  // compiled with Turbofan and which one with Liftoff.
+
+  i::wasm::fuzzer::WasmCompileFuzzer compilerFuzzer;
+
+  //uint8_t tier_mask = data.empty() ? 0 : data[0];
+  //if (!data.empty()) data += 1;
+  if (!compilerFuzzer.GenerateModule(isolate, &zone, data, &buffer, &num_args,
+                      &interpreter_args, &compiler_args)) {
+    return false;
+  }
+
+  // Fast marshall to output
+  auto generatedSize = buffer.size();
+  output.resize(generatedSize);
+  std::memcpy(output.data(), buffer.data(), generatedSize);
+  return true;
 }
