@@ -314,6 +314,10 @@ config("internal_config") {
   if (is_component_build) {
     defines += [ "BUILDING_V8_SHARED" ]
   }
+
+  # Disable atomic generator (Need to add conditional here)
+  defines += [ "EXT_DISABLE_ATOMIC" ]
+  
 }
 
 # Should be applied to all targets that write trace events.
@@ -2070,8 +2074,6 @@ v8_source_set("v8_base_without_compiler") {
     "src/api/api-natives.h",
     "src/api/api.cc",
     "src/api/api.h",
-    "src/api/ext-api.cc",
-    "src/api/ext-api.h",
     "src/asmjs/asm-js.cc",
     "src/asmjs/asm-js.h",
     "src/asmjs/asm-names.h",
@@ -4800,3 +4802,25 @@ if (!build_with_chromium && v8_use_perfetto) {
     }
   }  # host_toolchain
 }  # if (!build_with_chromium && v8_use_perfetto)
+
+
+v8_component("v8_ext_diff_fuzz") {
+  sources = [
+    "src/api/ext-api.cc",
+    "src/api/ext-api.h",
+  ]
+
+  deps = [
+    ":v8_base_without_compiler",
+    ":v8_compiler",
+    ":v8_snapshot",
+    ":lib_wasm_fuzzer_common",
+    ":wasm_module_runner",
+    ":wasm_compile_fuzzer",
+    ":fuzzer_support"
+  ]
+
+  # public_deps = [ ":v8" ]
+
+  configs = [ ":internal_config" ]
+}

@@ -43,6 +43,15 @@ class WasmExecutionFuzzer {
       std::unique_ptr<Handle<Object>[]>* compiler_args) = 0;
 };
 
+class WasmCompileFuzzer : public WasmExecutionFuzzer {
+public:
+  bool GenerateModule(
+      Isolate* isolate, Zone* zone, Vector<const uint8_t> data,
+      ZoneBuffer* buffer, int32_t* num_args,
+      std::unique_ptr<WasmValue[]>* interpreter_args,
+      std::unique_ptr<Handle<Object>[]>* compiler_args) override;
+};
+
 }  // namespace fuzzer
 }  // namespace wasm
 }  // namespace internal

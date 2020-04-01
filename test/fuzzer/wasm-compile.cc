@@ -23,6 +23,8 @@
 #include "test/fuzzer/fuzzer-support.h"
 #include "test/fuzzer/wasm-fuzzer-common.h"
 
+#define EXT_DISABLE_ATOMIC
+
 namespace v8 {
 namespace internal {
 namespace wasm {
@@ -610,6 +612,8 @@ void WasmGenerator::Generate<ValueType::kStmt>(DataRange* data) {
       &WasmGenerator::memop<kExprI64StoreMem32, ValueType::kI64>,
       &WasmGenerator::memop<kExprF32StoreMem, ValueType::kF32>,
       &WasmGenerator::memop<kExprF64StoreMem, ValueType::kF64>,
+
+#ifndef EXT_DISABLE_ATOMIC
       &WasmGenerator::memop<kExprI32AtomicStore, ValueType::kI32>,
       &WasmGenerator::memop<kExprI32AtomicStore8U, ValueType::kI32>,
       &WasmGenerator::memop<kExprI32AtomicStore16U, ValueType::kI32>,
@@ -618,6 +622,7 @@ void WasmGenerator::Generate<ValueType::kStmt>(DataRange* data) {
       &WasmGenerator::memop<kExprI64AtomicStore16U, ValueType::kI64>,
       &WasmGenerator::memop<kExprI64AtomicStore32U, ValueType::kI64>,
       &WasmGenerator::memop<kExprS128StoreMem, ValueType::kS128>,
+#endif
 
       &WasmGenerator::drop,
 
@@ -713,6 +718,8 @@ void WasmGenerator::Generate<ValueType::kI32>(DataRange* data) {
       &WasmGenerator::memop<kExprI32LoadMem8U>,
       &WasmGenerator::memop<kExprI32LoadMem16S>,
       &WasmGenerator::memop<kExprI32LoadMem16U>,
+
+#ifndef EXT_DISABLE_ATOMIC
       &WasmGenerator::memop<kExprI32AtomicLoad>,
       &WasmGenerator::memop<kExprI32AtomicLoad8U>,
       &WasmGenerator::memop<kExprI32AtomicLoad16U>,
@@ -766,6 +773,9 @@ void WasmGenerator::Generate<ValueType::kI32>(DataRange* data) {
       &WasmGenerator::simd_op<kExprS1x8AnyTrue, ValueType::kS128>,
       &WasmGenerator::simd_op<kExprS1x4AnyTrue, ValueType::kS128>,
 
+#endif
+
+
       &WasmGenerator::current_memory,
       &WasmGenerator::grow_memory,
 
@@ -774,8 +784,9 @@ void WasmGenerator::Generate<ValueType::kI32>(DataRange* data) {
       &WasmGenerator::get_global<ValueType::kI32>,
       &WasmGenerator::op<kExprSelect, ValueType::kI32, ValueType::kI32,
                          ValueType::kI32>,
+#ifndef EXT_DISABLE_ATOMIC
       &WasmGenerator::select_with_type<ValueType::kI32>,
-
+#endif
       &WasmGenerator::call<ValueType::kI32>};
 
   GenerateOneOf(alternatives, data);
@@ -838,6 +849,8 @@ void WasmGenerator::Generate<ValueType::kI64>(DataRange* data) {
       &WasmGenerator::memop<kExprI64LoadMem16U>,
       &WasmGenerator::memop<kExprI64LoadMem32S>,
       &WasmGenerator::memop<kExprI64LoadMem32U>,
+
+#ifndef EXT_DISABLE_ATOMIC
       &WasmGenerator::memop<kExprI64AtomicLoad>,
       &WasmGenerator::memop<kExprI64AtomicLoad8U>,
       &WasmGenerator::memop<kExprI64AtomicLoad16U>,
@@ -902,14 +915,16 @@ void WasmGenerator::Generate<ValueType::kI64>(DataRange* data) {
       &WasmGenerator::atomic_op<kExprI64AtomicCompareExchange32U,
                                 ValueType::kI32, ValueType::kI64,
                                 ValueType::kI64>,
+#endif
 
       &WasmGenerator::get_local<ValueType::kI64>,
       &WasmGenerator::tee_local<ValueType::kI64>,
       &WasmGenerator::get_global<ValueType::kI64>,
       &WasmGenerator::op<kExprSelect, ValueType::kI64, ValueType::kI64,
                          ValueType::kI32>,
+#ifndef EXT_DISABLE_ATOMIC
       &WasmGenerator::select_with_type<ValueType::kI64>,
-
+#endif
       &WasmGenerator::call<ValueType::kI64>};
 
   GenerateOneOf(alternatives, data);
@@ -963,8 +978,9 @@ void WasmGenerator::Generate<ValueType::kF32>(DataRange* data) {
       &WasmGenerator::get_global<ValueType::kF32>,
       &WasmGenerator::op<kExprSelect, ValueType::kF32, ValueType::kF32,
                          ValueType::kI32>,
+#ifndef EXT_DISABLE_ATOMIC
       &WasmGenerator::select_with_type<ValueType::kF32>,
-
+#endif
       &WasmGenerator::call<ValueType::kF32>};
 
   GenerateOneOf(alternatives, data);
@@ -1018,8 +1034,9 @@ void WasmGenerator::Generate<ValueType::kF64>(DataRange* data) {
       &WasmGenerator::get_global<ValueType::kF64>,
       &WasmGenerator::op<kExprSelect, ValueType::kF64, ValueType::kF64,
                          ValueType::kI32>,
+#ifndef EXT_DISABLE_ATOMIC
       &WasmGenerator::select_with_type<ValueType::kF64>,
-
+#endif
       &WasmGenerator::call<ValueType::kF64>};
 
   GenerateOneOf(alternatives, data);
@@ -1136,8 +1153,10 @@ void WasmGenerator::Generate(ValueType type, DataRange* data) {
       return Generate<ValueType::kF32>(data);
     case ValueType::kF64:
       return Generate<ValueType::kF64>(data);
+#ifndef EXT_DISABLE_ATOMIC
     case ValueType::kS128:
       return Generate<ValueType::kS128>(data);
+#endif
     default:
       UNREACHABLE();
   }
@@ -1157,75 +1176,86 @@ FunctionSig* GenerateSig(Zone* zone, DataRange* data) {
 
 }  // namespace
 
-class WasmCompileFuzzer : public WasmExecutionFuzzer {
-  bool GenerateModule(
-      Isolate* isolate, Zone* zone, Vector<const uint8_t> data,
-      ZoneBuffer* buffer, int32_t* num_args,
-      std::unique_ptr<WasmValue[]>* interpreter_args,
-      std::unique_ptr<Handle<Object>[]>* compiler_args) override {
-    TestSignatures sigs;
+bool WasmCompileFuzzer::GenerateModule(
+    Isolate* isolate, Zone* zone, Vector<const uint8_t> data,
+    ZoneBuffer* buffer, int32_t* num_args,
+    std::unique_ptr<WasmValue[]>* interpreter_args,
+    std::unique_ptr<Handle<Object>[]>* compiler_args) {
+  TestSignatures sigs;
 
-    WasmModuleBuilder builder(zone);
+  WasmModuleBuilder builder(zone);
 
-    DataRange range(data);
-    std::vector<FunctionSig*> function_signatures;
-    function_signatures.push_back(sigs.i_iii());
+  DataRange range(data);
+  std::vector<FunctionSig*> function_signatures;
+  function_signatures.push_back(sigs.i_iii());
 
-    static_assert(kMaxFunctions >= 1, "need min. 1 function");
-    int num_functions = 1 + (range.get<uint8_t>() % kMaxFunctions);
+  static_assert(kMaxFunctions >= 1, "need min. 1 function");
+  int num_functions = 1 + (range.get<uint8_t>() % kMaxFunctions);
 
-    for (int i = 1; i < num_functions; ++i) {
-      function_signatures.push_back(GenerateSig(zone, &range));
-    }
-
-    int num_globals = range.get<uint8_t>() % (kMaxGlobals + 1);
-    std::vector<ValueType> globals;
-    std::vector<uint8_t> mutable_globals;
-    globals.reserve(num_globals);
-    mutable_globals.reserve(num_globals);
-
-    for (int i = 0; i < num_globals; ++i) {
-      ValueType type = GetValueType(&range);
-      // 1/8 of globals are immutable.
-      const bool mutability = (range.get<uint8_t>() % 8) != 0;
-      builder.AddGlobal(type, mutability, WasmInitExpr());
-      globals.push_back(type);
-      if (mutability) mutable_globals.push_back(static_cast<uint8_t>(i));
-    }
-
-    for (int i = 0; i < num_functions; ++i) {
-      DataRange function_range =
-          i == num_functions - 1 ? std::move(range) : range.split();
-
-      FunctionSig* sig = function_signatures[i];
-      WasmFunctionBuilder* f = builder.AddFunction(sig);
-
-      WasmGenerator gen(f, function_signatures, globals, mutable_globals,
-                        &function_range);
-      ValueType return_type =
-          sig->return_count() == 0 ? kWasmStmt : sig->GetReturn(0);
-      gen.Generate(return_type, &function_range);
-
-      f->Emit(kExprEnd);
-      if (i == 0) builder.AddExport(CStrVector("main"), f);
-    }
-
-    builder.SetMaxMemorySize(32);
-    // We enable shared memory to be able to test atomics.
-    builder.SetHasSharedMemory();
-    builder.WriteTo(buffer);
-
-    *num_args = 3;
-    interpreter_args->reset(
-        new WasmValue[3]{WasmValue(1), WasmValue(2), WasmValue(3)});
-
-    compiler_args->reset(new Handle<Object>[3] {
-      handle(Smi::FromInt(1), isolate), handle(Smi::FromInt(2), isolate),
-          handle(Smi::FromInt(3), isolate)
-    });
-    return true;
+  for (int i = 1; i < num_functions; ++i) {
+    function_signatures.push_back(GenerateSig(zone, &range));
   }
-};
+
+  int num_globals = range.get<uint8_t>() % (kMaxGlobals + 1);
+  std::vector<ValueType> globals;
+  std::vector<uint8_t> mutable_globals;
+  globals.reserve(num_globals);
+  mutable_globals.reserve(num_globals);
+
+  for (int i = 0; i < num_globals; ++i) {
+    ValueType type = GetValueType(&range);
+    // 1/8 of globals are immutable.
+    const bool mutability = (range.get<uint8_t>() % 8) != 0;
+    builder.AddGlobal(type, mutability, WasmInitExpr());
+    globals.push_back(type);
+    if (mutability) mutable_globals.push_back(static_cast<uint8_t>(i));
+  }
+
+  // Cache function names
+  std::list<std::string> funcNames;
+
+  for (int i = 0; i < num_functions; ++i) {
+    std::string newFuncName { "func" }; 
+    newFuncName += std::to_string(i);
+
+    funcNames.emplace_back(std::move(newFuncName));
+    auto& funcName = funcNames.back();
+    std::cout << "Generating " << funcName << "\n";
+
+    DataRange function_range =
+        i == num_functions - 1 ? std::move(range) : range.split();
+
+    FunctionSig* sig = function_signatures[i];
+    WasmFunctionBuilder* f = builder.AddFunction(sig);
+
+    WasmGenerator gen(f, function_signatures, globals, mutable_globals,
+                      &function_range);
+    ValueType return_type =
+        sig->return_count() == 0 ? kWasmStmt : sig->GetReturn(0);
+    gen.Generate(return_type, &function_range);
+
+    f->Emit(kExprEnd);
+    //if (i == 0) builder.AddExport(CStrVector("main"), f);
+    
+    builder.AddExport(CStrVector(funcName.c_str()), f);
+  }
+
+  builder.SetMaxMemorySize(32);
+  // We enable shared memory to be able to test atomics.
+  //builder.SetHasSharedMemory();
+  builder.WriteTo(buffer);
+
+  *num_args = 3;
+  interpreter_args->reset(
+      new WasmValue[3]{WasmValue(1), WasmValue(2), WasmValue(3)});
+
+  compiler_args->reset(new Handle<Object>[3] {
+    handle(Smi::FromInt(1), isolate), handle(Smi::FromInt(2), isolate),
+        handle(Smi::FromInt(3), isolate)
+  });
+  return true;
+}
+
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   constexpr bool require_valid = true;
