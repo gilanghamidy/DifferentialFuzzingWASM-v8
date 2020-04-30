@@ -77,9 +77,21 @@ class DataRange {
     data_ += num_bytes;
     return result;
   }
-
+  
   DISALLOW_COPY_AND_ASSIGN(DataRange);
 };
+
+
+template<>
+bool DataRange::get<bool>() {
+  // SPECIALIZATION FOR BOOL
+  // The -O3 on release will break the result as returning bool will not
+  // be flattened to 0 or 1. This creates a different observable side effect when
+  // invoking get<bool> between debug and release version, which eventually makes
+  // the code output different as well as raising various unrecoverable errors on runtime
+  return get<uint8_t>() % 2 == 0;
+}
+
 
 ValueType GetValueType(DataRange* data) {
   // TODO(v8:8460): We do not add kWasmS128 here yet because this method is used
@@ -157,7 +169,6 @@ class WasmGenerator {
     DCHECK(!blocks_.empty());
     const uint32_t target_block = data->get<uint32_t>() % blocks_.size();
     const ValueType break_type = blocks_[target_block];
-
     Generate(break_type, data);
     builder_->EmitWithI32V(
         kExprBr, static_cast<uint32_t>(blocks_.size()) - 1 - target_block);
@@ -169,7 +180,6 @@ class WasmGenerator {
     DCHECK(!blocks_.empty());
     const uint32_t target_block = data->get<uint32_t>() % blocks_.size();
     const ValueType break_type = blocks_[target_block];
-
     Generate(break_type, data);
     Generate(kWasmI32, data);
     builder_->EmitWithI32V(
@@ -278,13 +288,16 @@ class WasmGenerator {
     }
   }
 
+  template<typename ValueType::Kind, typename ValueType::Kind... arg_types>
+  void GenerateWithBound(DataRange* data);
+
   template <WasmOpcode memory_op, ValueType::Kind... arg_types>
   void memop(DataRange* data) {
     const uint8_t align = data->get<uint8_t>() % (max_alignment(memory_op) + 1);
-    const uint32_t offset = data->get<uint32_t>();
+    const uint32_t offset = data->get<uint32_t>() % max_memory_;
 
     // Generate the index and the arguments, if any.
-    Generate<ValueType::kI32, arg_types...>(data);
+    GenerateWithBound<ValueType::kI32, arg_types...>(data);
 
     if (WasmOpcodes::IsPrefixOpcode(static_cast<WasmOpcode>(memory_op >> 8))) {
       DCHECK(memory_op >> 8 == kAtomicPrefix || memory_op >> 8 == kSimdPrefix);
@@ -415,7 +428,7 @@ class WasmGenerator {
       if (wanted_type == ValueType::kStmt) return;
       return Generate<wanted_type>(data);
     }
-
+    
     if (opcode != kExprLocalGet) Generate(local.type, data);
     builder_->EmitWithU32V(opcode, local.index);
     if (wanted_type != ValueType::kStmt && local.type.kind() != wanted_type) {
@@ -471,7 +484,7 @@ class WasmGenerator {
       if (wanted_type == ValueType::kStmt) return;
       return Generate<wanted_type>(data);
     }
-
+    
     if (is_set) Generate(global.type, data);
     builder_->EmitWithU32V(is_set ? kExprGlobalSet : kExprGlobalGet,
                            global.index);
@@ -537,11 +550,13 @@ class WasmGenerator {
   WasmGenerator(WasmFunctionBuilder* fn,
                 const std::vector<FunctionSig*>& functions,
                 const std::vector<ValueType>& globals,
-                const std::vector<uint8_t>& mutable_globals, DataRange* data)
+                const std::vector<uint8_t>& mutable_globals, 
+                DataRange* data, size_t max_memory_pages)
       : builder_(fn),
         functions_(functions),
         globals_(globals),
-        mutable_globals_(mutable_globals) {
+        mutable_globals_(mutable_globals),
+        max_memory_(max_memory_pages * 64 * 1024) {
     FunctionSig* sig = fn->signature();
     DCHECK_GE(1, sig->return_count());
     blocks_.push_back(sig->return_count() == 0 ? kWasmStmt : sig->GetReturn(0));
@@ -575,6 +590,7 @@ class WasmGenerator {
   std::vector<ValueType> globals_;
   std::vector<uint8_t> mutable_globals_;  // indexes into {globals_}.
   uint32_t recursion_depth = 0;
+  size_t max_memory_ = UINT64_MAX;
 
   static constexpr uint32_t kMaxRecursionDepth = 64;
 
@@ -638,7 +654,8 @@ template <>
 void WasmGenerator::Generate<ValueType::kI32>(DataRange* data) {
   GeneratorRecursionScope rec_scope(this);
   if (recursion_limit_reached() || data->size() <= 1) {
-    builder_->EmitI32Const(data->get<uint32_t>());
+    //std::cout << "Limit reached: " << data->size() << std::endl;
+    builder_->EmitI32Const(data->get<int32_t>());
     return;
   }
 
@@ -1136,6 +1153,18 @@ void WasmGenerator::Generate<ValueType::kS128>(DataRange* data) {
   GenerateOneOf(alternatives, data);
 }
 
+template<typename ValueType::Kind kind, typename ValueType::Kind... arg_types>
+void WasmGenerator::GenerateWithBound(DataRange* data) {
+  GenerateWithBound<ValueType::kI32>(data);
+  Generate<arg_types...>(data);
+}
+
+template<>
+void WasmGenerator::GenerateWithBound<ValueType::kI32>(DataRange* data) {
+  Generate<ValueType::kI32>(data);
+  builder_->EmitI32Const((int32_t)max_memory_);
+  builder_->Emit(kExprI32RemU); // Emit modulus
+}
 void WasmGenerator::grow_memory(DataRange* data) {
   Generate<ValueType::kI32>(data);
   builder_->EmitWithU8(kExprMemoryGrow, 0);
@@ -1158,6 +1187,7 @@ void WasmGenerator::Generate(ValueType type, DataRange* data) {
       return Generate<ValueType::kS128>(data);
 #endif
     default:
+      std::cerr << "Type: " << (int)type.kind() << std::endl;
       UNREACHABLE();
   }
 }
@@ -1167,7 +1197,7 @@ FunctionSig* GenerateSig(Zone* zone, DataRange* data) {
   constexpr int kMaxParameters = 15;
   int num_params = int{data->get<uint8_t>()} % (kMaxParameters + 1);
   bool has_return = data->get<bool>();
-
+  
   FunctionSig::Builder builder(zone, has_return ? 1 : 0, num_params);
   if (has_return) builder.AddReturn(GetValueType(data));
   for (int i = 0; i < num_params; ++i) builder.AddParam(GetValueType(data));
@@ -1187,12 +1217,18 @@ bool WasmCompileFuzzer::GenerateModule(
 
   DataRange range(data);
   std::vector<FunctionSig*> function_signatures;
-  function_signatures.push_back(sigs.i_iii());
+  //function_signatures.push_back(sigs.i_iii());
+
+  // Setting memory configuration
+  uint16_t min = (range.get<uint16_t>() % 1024) + 1; // Maximum is 1024 pages or 64MB
+  uint16_t max = std::max((uint16_t)(range.get<uint16_t>() % 1024 + 1), min);
+  builder.SetMinMemorySize(min);
+  builder.SetMaxMemorySize(max);
 
   static_assert(kMaxFunctions >= 1, "need min. 1 function");
   int num_functions = 1 + (range.get<uint8_t>() % kMaxFunctions);
 
-  for (int i = 1; i < num_functions; ++i) {
+  for (int i = 0; i < num_functions; ++i) {
     function_signatures.push_back(GenerateSig(zone, &range));
   }
 
@@ -1213,7 +1249,6 @@ bool WasmCompileFuzzer::GenerateModule(
 
   // Cache function names
   std::list<std::string> funcNames;
-
   for (int i = 0; i < num_functions; ++i) {
     std::string newFuncName { "func" }; 
     newFuncName += std::to_string(i);
@@ -1229,7 +1264,7 @@ bool WasmCompileFuzzer::GenerateModule(
     WasmFunctionBuilder* f = builder.AddFunction(sig);
 
     WasmGenerator gen(f, function_signatures, globals, mutable_globals,
-                      &function_range);
+                      &function_range, min);
     ValueType return_type =
         sig->return_count() == 0 ? kWasmStmt : sig->GetReturn(0);
     gen.Generate(return_type, &function_range);
@@ -1239,10 +1274,10 @@ bool WasmCompileFuzzer::GenerateModule(
     
     builder.AddExport(CStrVector(funcName.c_str()), f);
   }
-
-  builder.SetMaxMemorySize(32);
+  
   // We enable shared memory to be able to test atomics.
   //builder.SetHasSharedMemory();
+  builder.SetHasMemoryImport();
   builder.WriteTo(buffer);
 
   *num_args = 3;
@@ -1250,7 +1285,8 @@ bool WasmCompileFuzzer::GenerateModule(
       new WasmValue[3]{WasmValue(1), WasmValue(2), WasmValue(3)});
 
   compiler_args->reset(new Handle<Object>[3] {
-    handle(Smi::FromInt(1), isolate), handle(Smi::FromInt(2), isolate),
+    // Store minimum memory size as first compiler args
+    handle(Smi::FromInt(min), isolate), handle(Smi::FromInt(2), isolate),
         handle(Smi::FromInt(3), isolate)
   });
   return true;

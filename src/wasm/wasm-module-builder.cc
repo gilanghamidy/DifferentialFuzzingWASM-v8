@@ -248,7 +248,8 @@ WasmModuleBuilder::WasmModuleBuilder(Zone* zone)
       min_memory_size_(16),
       max_memory_size_(0),
       has_max_memory_size_(false),
-      has_shared_memory_(false) {}
+      has_shared_memory_(false),
+      has_memory_import_(false) {}
 
 WasmFunctionBuilder* WasmModuleBuilder::AddFunction(FunctionSig* sig) {
   functions_.push_back(new (zone_) WasmFunctionBuilder(this));
@@ -392,6 +393,7 @@ void WasmModuleBuilder::SetMaxMemorySize(uint32_t value) {
 }
 
 void WasmModuleBuilder::SetHasSharedMemory() { has_shared_memory_ = true; }
+void WasmModuleBuilder::SetHasMemoryImport() { has_memory_import_ = true; }
 
 void WasmModuleBuilder::WriteTo(ZoneBuffer* buffer) const {
   // == Emit magic =============================================================
@@ -418,9 +420,10 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer* buffer) const {
   }
 
   // == Emit imports ===========================================================
-  if (global_imports_.size() + function_imports_.size() > 0) {
+  auto import_size = global_imports_.size() + function_imports_.size() + (has_memory_import_ ? 1 : 0);
+  if (import_size > 0) {
     size_t start = EmitSection(kImportSectionCode, buffer);
-    buffer->write_size(global_imports_.size() + function_imports_.size());
+    buffer->write_size(import_size);
     for (auto import : global_imports_) {
       buffer->write_u32v(0);              // module name (length)
       buffer->write_string(import.name);  // field name
@@ -433,6 +436,22 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer* buffer) const {
       buffer->write_string(import.name);  // field name
       buffer->write_u8(kExternalFunction);
       buffer->write_u32v(import.sig_index);
+    }
+    // If there is a memory import declared
+    if(has_memory_import_) {
+      char const mem_name_str[] = "mem";
+      Vector<const char> mem_name(mem_name_str, sizeof(mem_name_str) - 1);
+      buffer->write_u32v(0);              // module name (length)
+      buffer->write_string(mem_name);  // field name
+      buffer->write_u8(kExternalMemory);
+      if(has_max_memory_size_) {
+        buffer->write_u8(MemoryFlags::kMaximum);
+        buffer->write_u32v(min_memory_size_);
+        buffer->write_u32v(max_memory_size_);
+      } else {
+        buffer->write_u8(MemoryFlags::kNoMaximum);
+        buffer->write_u32v(min_memory_size_);
+      }
     }
     FixupSection(buffer, start);
   }
@@ -463,7 +482,8 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer* buffer) const {
   }
 
   // == Emit memory declaration ================================================
-  {
+  // If already has memory import, this one is unavailable
+  if(!has_memory_import_) {
     size_t start = EmitSection(kMemorySectionCode, buffer);
     buffer->write_u8(1);  // memory count
     if (has_shared_memory_) {
