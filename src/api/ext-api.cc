@@ -20,59 +20,107 @@
 
 namespace i = v8::internal;
 
+namespace { 
+  v8::ext::WasmType ExtTyFromInternalTy(v8::internal::wasm::ValueType::Kind kind) {
+    using K = v8::internal::wasm::ValueType::Kind;
+    using E = v8::ext::WasmType;
+    switch (kind)
+    {
+    case K::kStmt:  return E::Void;
+    case K::kI32:   return E::I32;
+    case K::kI64:   return E::I64;
+    case K::kF32:   return E::F32;
+    case K::kF64:   return E::F64;
+    default: // Abort with other kind
+      v8::internal::abort_with_reason((int)v8::internal::AbortReason::kUnexpectedValue);
+    }
+    UNREACHABLE();
+    return E::Void;
+  }
+}
+
 void v8::ext::HelloDarling() {
   std::cout << "Hello Darling!" << std::endl;
 }
 
 struct v8::ext::CompiledWasmFunction::Internal {
   i::Handle<i::WasmExternalFunction> function_handle;
-  i::Handle<i::WasmModuleObject> compiled_module;
+
+  std::unique_ptr<Internal> Clone() {
+    auto ret = std::make_unique<Internal>();
+    *ret = *this;
+    return ret;
+  }
+
+  Internal& operator=(Internal const& that) {
+    this->function_handle = that.function_handle;
+    return *this;
+  }
 };
 
-v8::ext::CompiledWasmFunction::CompiledWasmFunction() {
-  this->internal = new Internal;
+struct v8::ext::CompiledWasm::Internal {
+  i::Handle<i::WasmModuleObject> module_object { i::Handle<i::WasmModuleObject>::null() };
+  i::Handle<i::WasmInstanceObject> module_instance { i::Handle<i::WasmInstanceObject>::null() };
+  i::Handle<i::WasmMemoryObject> wasm_memory_object { i::Handle<i::WasmMemoryObject>::null() };
+};
+
+void v8::ext::CompiledWasmFunction::Reattach(CompiledWasm& parent) {
+  this->parent = std::ref(parent);
 }
+
+v8::ext::CompiledWasmFunction::CompiledWasmFunction(CompiledWasm& parent) : 
+  internal(std::make_unique<Internal>()), parent(parent) { }
 
 v8::ext::CompiledWasmFunction& v8::ext::CompiledWasmFunction::operator=(v8::ext::CompiledWasmFunction&& that) {
-  if(this->internal)
-    delete this->internal;
-
-  this->internal = that.internal;
-  that.internal = nullptr;
-
+  this->internal = std::move(that.internal);
   this->func_index = that.func_index;
-
+  this->name = std::move(that.name);
   return *this;
 }
 
-v8::ext::CompiledWasmFunction::CompiledWasmFunction(CompiledWasmFunction const& that) {
-  this->internal = new Internal;
-  this->internal->function_handle = that.internal->function_handle;
-  this->internal->compiled_module = that.internal->compiled_module;
-  this->func_index = that.func_index;
+v8::ext::WasmType v8::ext::CompiledWasmFunction::ReturnType() const {
+  auto wasm_func_sig = this->parent.get().internal
+                            ->module_object->module()
+                            ->functions[this->func_index].sig;
+  if(wasm_func_sig->return_count() == 0)
+    return ext::WasmType::Void;
+  return ExtTyFromInternalTy(wasm_func_sig->GetReturn().kind());
 }
+
+std::vector<v8::ext::WasmType> v8::ext::CompiledWasmFunction::Parameters() const {
+  auto wasm_func_sig = this->parent.get().internal
+                            ->module_object->module()
+                            ->functions[this->func_index].sig;
+
+  std::vector<v8::ext::WasmType> ret;
+  for(auto& kind_obj : wasm_func_sig->parameters()) {
+    ret.push_back(ExtTyFromInternalTy(kind_obj.kind()));
+  }
+  return ret;
+}
+
+v8::ext::CompiledWasmFunction::CompiledWasmFunction(CompiledWasmFunction const& that) : 
+  internal(that.internal->Clone()), func_index(that.func_index), parent(that.parent), name(that.name) { }
 
 v8::ext::CompiledWasmFunction& v8::ext::CompiledWasmFunction::operator=(CompiledWasmFunction const& that) {
-  this->internal->function_handle = that.internal->function_handle;
-  this->internal->compiled_module = that.internal->compiled_module;
+  *this->internal = *that.internal;
   this->func_index = that.func_index;
+  this->name = that.name;
   return *this;
 }
 
-v8::ext::CompiledWasmFunction::CompiledWasmFunction(CompiledWasmFunction&& that) {
-  this->internal = that.internal;
-  that.internal = nullptr;
-  this->func_index = that.func_index;
-}
+v8::ext::CompiledWasmFunction::CompiledWasmFunction(CompiledWasmFunction&& that) :
+  internal(std::move(that.internal)), func_index(that.func_index), parent(that.parent), name(std::move(that.name)) { }
 
 v8::ext::CompiledWasmFunction::~CompiledWasmFunction() {
-  if(this->internal != nullptr)
-    delete this->internal;
+
 }
 
 std::vector<uint8_t> v8::ext::CompiledWasmFunction::Instructions() const {
   i::wasm::WasmCodeRefScope ref_scope;
-  auto wasm_code = this->internal->compiled_module->native_module()->GetCode(this->func_index);
+  auto wasm_code = this->parent.get().internal
+                    ->module_object->native_module()
+                    ->GetCode(this->func_index);
   
   // Marshall out the data
   std::vector<uint8_t> ret;
@@ -84,12 +132,27 @@ std::vector<uint8_t> v8::ext::CompiledWasmFunction::Instructions() const {
 
 v8::MaybeLocal<v8::Value> V8_EXPORT v8::ext::CompiledWasmFunction::Invoke(v8::Isolate* i, std::vector<Local<Value>>& args) const {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(i);
+  
+  // Check if the function is available
+  if(this->internal->function_handle.is_null()) {
+    // Check if instance is there
+    auto module_instance = this->parent.get().internal->module_instance;
+    if(!module_instance.is_null()) {
+      i::Handle<i::WasmExternalFunction> the_function =
+              i::WasmInstanceObject::GetOrCreateWasmExternalFunction(isolate, module_instance, this->func_index);
+      this->internal->function_handle = the_function;
+    } else {
+      std::cerr << "ERROR: Module is not instantiated.\n";
+      return { };
+    }
+  }
+
   i::Handle<i::Object> undefined = isolate->factory()->undefined_value();
   i::MaybeHandle<i::Object> retval =
       i::Execution::Call(isolate, this->internal->function_handle, undefined, (int) args.size(), reinterpret_cast<i::Handle<i::Object>*>(args.data()));
   // The result should be a number.
   if (retval.is_null()) {
-    DCHECK(isolate->has_pending_exception());
+    //DCHECK(isolate->has_pending_exception());
     i::Handle<i::Object> pending_exception = handle(isolate->pending_exception(), isolate);
     Local<String> result;
     ToLocal<String>(i::Object::ToString(isolate, pending_exception), &result);
@@ -110,6 +173,11 @@ v8::MaybeLocal<v8::Value> V8_EXPORT v8::ext::CompiledWasmFunction::Invoke(v8::Is
 
   return result;
 }
+
+
+
+v8::ext::CompiledWasm::CompiledWasm() : 
+  internal(std::make_unique<Internal>()) { }
 
 v8::Maybe<v8::ext::CompiledWasm> v8::ext::CompileBinaryWasm(v8::Isolate* i, const uint8_t* arr, size_t len) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(i);
@@ -136,20 +204,9 @@ v8::Maybe<v8::ext::CompiledWasm> v8::ext::CompileBinaryWasm(v8::Isolate* i, cons
     
 
   auto compiled_module = compiled_module_res.ToHandleChecked();
-
-  // Instantiate the module
-  i::wasm::ErrorThrower thrower(isolate, "");
-  i::MaybeHandle<i::WasmInstanceObject> module_instance_res =
-                wasm_engine->SyncInstantiate(isolate, &thrower, compiled_module,
-                                             i::Handle<i::JSReceiver>::null(),
-                                             i::MaybeHandle<i::JSArrayBuffer>());
-
-  if(module_instance_res.is_null())
-    return v8::Nothing<v8::ext::CompiledWasm>();
-
-  auto module_instance = module_instance_res.ToHandleChecked();
+  
   v8::ext::CompiledWasm ret;
-
+  ret.internal->module_object = compiled_module;
   {
     i::wasm::ModuleWireBytes module_bytes(compiled_module->native_module()->wire_bytes());
     auto& export_table = compiled_module->module()->export_table;
@@ -159,14 +216,10 @@ v8::Maybe<v8::ext::CompiledWasm> v8::ext::CompileBinaryWasm(v8::Isolate* i, cons
       auto name = module_bytes.GetNameOrNull(exported.name);
       ret.function_names.emplace(std::string { name.data(), name.length() }, exported.index);
 
-      i::Handle<i::WasmExternalFunction> the_function =
-              i::WasmInstanceObject::GetOrCreateWasmExternalFunction(isolate, module_instance, exported.index);
-
-      CompiledWasmFunction func;
+      CompiledWasmFunction& func = ret.AddOneFunction();
+      func.name = std::string { name.data(), name.length() };
       func.func_index = exported.index;
-      func.internal->compiled_module = compiled_module;
-      func.internal->function_handle = the_function;
-      ret.functions.emplace_back(std::move(func));
+      func.internal->function_handle = decltype(func.internal->function_handle)::null(); //the_function;
     }
 
     /*
@@ -195,7 +248,147 @@ v8::Maybe<v8::ext::CompiledWasm> v8::ext::CompileBinaryWasm(v8::Isolate* i, cons
   return v8::Just<v8::ext::CompiledWasm>(ret);
 }
 
-bool v8::ext::GenerateRandomWasm(v8::Isolate* i, std::vector<uint8_t> const& input, std::vector<uint8_t>& output) {
+v8::ext::CompiledWasmFunction& v8::ext::CompiledWasm::AddOneFunction() {
+  this->functions.emplace_back(*this);
+  return this->functions.back();
+}
+
+void v8::ext::CompiledWasm::NewMemoryImport(v8::Isolate* i) {
+  i::wasm::WasmModule const* wasm_module = this->internal->module_object->module();
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(i);
+
+  
+  // Initialize backing store
+  auto initial_pages = wasm_module->initial_pages;
+  auto maximum_pages = wasm_module->has_maximum_pages ? wasm_module->maximum_pages : initial_pages * 10;
+  auto shared_flags = wasm_module->has_shared_memory ? i::SharedFlag::kShared : i::SharedFlag::kNotShared;
+  auto backing_store = i::BackingStore::AllocateWasmMemory(isolate, initial_pages, maximum_pages, shared_flags);
+
+  // Allocate JSArrayBuffer
+  auto array_buffer_mem = isolate->factory()->NewJSArrayBuffer(std::move(backing_store));
+
+  // New WasmMemoryObject
+  auto wasm_memory_object = i::WasmMemoryObject::New(isolate, array_buffer_mem, maximum_pages);
+
+  this->internal->wasm_memory_object = wasm_memory_object;
+}
+
+v8::ext::CompiledWasm::WasmMemoryRef v8::ext::CompiledWasm::GetWasmMemory() {
+  if(this->internal->wasm_memory_object.is_null()) {
+    return { nullptr, 0 };
+  }
+
+  auto array_buffer = this->internal->wasm_memory_object->array_buffer();
+  auto backing_store_ptr = array_buffer.GetBackingStore();
+
+  return { { backing_store_ptr, (uint8_t*)backing_store_ptr->buffer_start() }, backing_store_ptr->byte_length() };
+}
+
+std::tuple<bool, std::string> FindImportedMemory(i::Handle<i::WasmModuleObject> module_object) {
+  auto module_ = module_object->module();
+
+  for (size_t index = 0; index < module_->import_table.size(); index++) {
+    i::wasm::WasmImport const& import = module_->import_table[index];
+    if (import.kind == i::wasm::kExternalMemory) {
+      i::wasm::ModuleWireBytes module_bytes(module_object->native_module()->wire_bytes());
+      auto name_bytes = module_bytes.GetNameOrNull(import.field_name);
+      return { true, { name_bytes.begin(), name_bytes.end() } };
+    }
+  }
+  return { false, "" };
+}
+
+size_t V8_EXPORT v8::ext::CompiledWasm::GetWasmMemorySize() {
+  i::wasm::WasmModule const* wasm_module = this->internal->module_object->module();
+
+  if(!wasm_module->has_memory)
+    return 0;
+  
+  return wasm_module->initial_pages;
+}
+
+bool v8::ext::CompiledWasm::InstantiateWasm(Isolate* i) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(i);
+  auto wasm_engine = isolate->wasm_engine();
+
+  // Construct the module import if any
+  i::Handle<i::JSObject> values = i::Handle<i::JSObject>::null();
+  auto res = FindImportedMemory(this->internal->module_object);
+  if(std::get<0>(res)) {
+    if(this->internal->wasm_memory_object.is_null()) {
+      std::cerr << "Has memory import, but memory is not created\n";
+      return false;
+    }
+
+    values = isolate->factory()->NewJSObjectWithNullProto();
+    i::Handle<i::JSObject> module_value = isolate->factory()->NewJSObjectWithNullProto();
+    i::Handle<i::JSObject> mem_import_values = this->internal->wasm_memory_object;
+    i::JSObject::AddProperty(isolate, values, "", module_value, i::PropertyAttributes::NONE); // MODULE NAME IS ASSUMED NULL AT THE MOMENT
+    i::JSObject::AddProperty(isolate, module_value, std::get<1>(res).c_str(), mem_import_values, i::PropertyAttributes::NONE);
+  }
+
+  // Instantiate the module
+  i::wasm::ErrorThrower thrower(isolate, "");
+
+  i::MaybeHandle<i::WasmInstanceObject> module_instance_res =
+              wasm_engine->SyncInstantiate(isolate, &thrower, 
+                                            this->internal->module_object,
+                                            values,
+                                            i::MaybeHandle<i::JSArrayBuffer>());
+  
+  
+  if(module_instance_res.is_null()) {
+    std::cerr << "ERROR: " << thrower.error_msg() << "\n";
+    return false;
+  }
+
+  this->internal->module_instance = module_instance_res.ToHandleChecked();
+  return true;
+}
+
+v8::ext::CompiledWasm::~CompiledWasm() {
+
+}
+
+v8::ext::CompiledWasm::CompiledWasm(CompiledWasm&& that) : 
+  functions(std::move(that.functions)), 
+  function_names(std::move(that.function_names)),
+  internal(std::move(that.internal)) { 
+  EnsureChildBinding();
+}
+
+v8::ext::CompiledWasm& v8::ext::CompiledWasm::operator=(CompiledWasm&& that) { 
+  this->functions = std::move(that.functions);
+  this->function_names = std::move(that.function_names);
+  this->internal = std::move(that.internal);
+  EnsureChildBinding();
+  return *this;
+}
+
+v8::ext::CompiledWasm::CompiledWasm(CompiledWasm const& that) :
+  functions(that.functions), 
+  function_names(that.function_names),
+  internal(std::make_unique<Internal>(*that.internal)) {
+  EnsureChildBinding();
+}
+
+v8::ext::CompiledWasm& v8::ext::CompiledWasm::operator=(CompiledWasm const& that) { 
+  this->functions = that.functions;
+  this->function_names = that.function_names;
+  *this->internal = *that.internal;
+  EnsureChildBinding();
+  return *this;
+}
+
+void v8::ext::CompiledWasm::EnsureChildBinding() {
+  std::for_each(this->functions.begin(),
+                this->functions.end(), 
+                [this] (auto& a) {
+                  a.Reattach(*this);
+                });
+}
+
+std::tuple<bool, size_t> v8::ext::GenerateRandomWasm(v8::Isolate* i, std::vector<uint8_t> const& input, std::vector<uint8_t>& output) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(i);
 
   // Wrap the vector
@@ -218,12 +411,17 @@ bool v8::ext::GenerateRandomWasm(v8::Isolate* i, std::vector<uint8_t> const& inp
   //if (!data.empty()) data += 1;
   if (!compilerFuzzer.GenerateModule(isolate, &zone, data, &buffer, &num_args,
                       &interpreter_args, &compiler_args)) {
-    return false;
+    return {false, 0};
   }
 
   // Fast marshall to output
   auto generatedSize = buffer.size();
   output.resize(generatedSize);
   std::memcpy(output.data(), buffer.data(), generatedSize);
-  return true;
+
+  decltype(auto) mem_size_ret = compiler_args[0];
+  decltype(auto) mem_size = i::Handle<i::Smi>::cast(mem_size_ret);
+  auto mem = mem_size->value();
+
+  return {true, mem};
 }

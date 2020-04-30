@@ -263,6 +263,7 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
   void SetMinMemorySize(uint32_t value);
   void SetMaxMemorySize(uint32_t value);
   void SetHasSharedMemory();
+  void SetHasMemoryImport();
 
   // Writing methods.
   void WriteTo(ZoneBuffer* buffer) const;
@@ -347,6 +348,7 @@ class V8_EXPORT_PRIVATE WasmModuleBuilder : public ZoneObject {
   uint32_t max_memory_size_;
   bool has_max_memory_size_;
   bool has_shared_memory_;
+  bool has_memory_import_;
 #if DEBUG
   // Once AddExportedImport is called, no more imports can be added.
   bool adding_imports_allowed_ = true;
