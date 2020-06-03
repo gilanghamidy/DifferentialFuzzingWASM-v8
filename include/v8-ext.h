@@ -24,6 +24,13 @@ enum class WasmType {
   F64
 };
 
+union WasmGlobalArg {
+  int32_t i32;
+  int64_t i64;
+  float   f32;
+  double  f64;
+};
+
 class V8_EXPORT CompiledWasmFunction {
   struct Internal;
   std::unique_ptr<Internal> internal;
@@ -59,6 +66,7 @@ class CompiledWasm {
   std::vector<CompiledWasmFunction> functions;
   std::map<std::string, size_t> function_names;
   std::unique_ptr<Internal> internal;
+  std::map<std::string, WasmType> globals;
 
   friend class CompiledWasmFunction;
   friend Maybe<CompiledWasm> v8::ext::CompileBinaryWasm(Isolate* i, const uint8_t* arr, size_t len);
@@ -82,6 +90,7 @@ public:
   CompiledWasmFunction const& operator[](std::string const& name) { return FunctionByName(name); }
 
   std::vector<CompiledWasmFunction> const& Functions() const noexcept { return functions; }
+  std::map<std::string, WasmType> const& Globals() const noexcept { return globals; }
 
   V8_EXPORT CompiledWasm(CompiledWasm&& that);
   CompiledWasm& V8_EXPORT operator=(CompiledWasm&& that);
@@ -92,6 +101,10 @@ public:
   bool V8_EXPORT InstantiateWasm(Isolate* i);
 
   void V8_EXPORT NewMemoryImport(v8::Isolate* i);
+  void V8_EXPORT NewGlobalImport(v8::Isolate* i);
+
+  void V8_EXPORT SetGlobalImport(std::string const& name, WasmGlobalArg value);
+  std::pair<WasmType, WasmGlobalArg> V8_EXPORT GetGlobalImport(std::string const& name);
 
   WasmMemoryRef V8_EXPORT GetWasmMemory();
 

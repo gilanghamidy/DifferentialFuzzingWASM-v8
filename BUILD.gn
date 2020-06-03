@@ -5097,6 +5097,7 @@ if (!build_with_chromium && v8_use_perfetto) {
   }
 }  # if (!build_with_chromium && v8_use_perfetto)
 
+# DIFFERENTIAL FUZZING INSTRUMENTATION
 
 v8_component("v8_ext_diff_fuzz") {
   sources = [

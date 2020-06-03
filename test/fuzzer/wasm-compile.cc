@@ -35,7 +35,7 @@ namespace {
 constexpr int kMaxFunctions = 4;
 constexpr int kMaxGlobals = 64;
 constexpr int kMaxParameters = 15;
-constexpr int kMaxReturns = 15;
+constexpr int kMaxReturns = 1;
 
 class DataRange {
   Vector<const uint8_t> data_;
@@ -849,10 +849,12 @@ void WasmGenerator::Generate<ValueType::kI32>(DataRange* data) {
       &WasmGenerator::op<kExprI32UConvertF64, ValueType::kF64>,
       &WasmGenerator::op<kExprI32ReinterpretF32, ValueType::kF32>,
 
+#ifndef EXT_DISABLE_ATOMIC
       &WasmGenerator::op_with_prefix<kExprI32SConvertSatF32, ValueType::kF32>,
       &WasmGenerator::op_with_prefix<kExprI32UConvertSatF32, ValueType::kF32>,
       &WasmGenerator::op_with_prefix<kExprI32SConvertSatF64, ValueType::kF64>,
       &WasmGenerator::op_with_prefix<kExprI32UConvertSatF64, ValueType::kF64>,
+#endif
 
       &WasmGenerator::block<ValueType::kI32>,
       &WasmGenerator::loop<ValueType::kI32>,
@@ -982,12 +984,12 @@ void WasmGenerator::Generate<ValueType::kI64>(DataRange* data) {
       &WasmGenerator::op<kExprI64Clz, ValueType::kI64>,
       &WasmGenerator::op<kExprI64Ctz, ValueType::kI64>,
       &WasmGenerator::op<kExprI64Popcnt, ValueType::kI64>,
-
+#ifndef EXT_DISABLE_ATOMIC
       &WasmGenerator::op_with_prefix<kExprI64SConvertSatF32, ValueType::kF32>,
       &WasmGenerator::op_with_prefix<kExprI64UConvertSatF32, ValueType::kF32>,
       &WasmGenerator::op_with_prefix<kExprI64SConvertSatF64, ValueType::kF64>,
       &WasmGenerator::op_with_prefix<kExprI64UConvertSatF64, ValueType::kF64>,
-
+#endif
       &WasmGenerator::block<ValueType::kI64>,
       &WasmGenerator::loop<ValueType::kI64>,
       &WasmGenerator::if_<ValueType::kI64, kIfElse>,
@@ -1524,8 +1526,12 @@ void WasmGenerator::Generate(Vector<const ValueType> types, DataRange* data) {
   // Maybe emit a multi-value block with the expected return type. Use a
   // non-default value to indicate block generation to avoid recursion when we
   // reach the end of the data.
+  bool enable_block = true;
+#ifdef EXT_DISABLE_ATOMIC
+  enable_block = false;
+#endif
   bool generate_block = data->get<uint8_t>() % 32 == 1;
-  if (generate_block) {
+  if (generate_block && enable_block) {
     GeneratorRecursionScope rec_scope(this);
     if (!recursion_limit_reached()) {
       const auto param_types = GenerateTypes(data);
@@ -1655,7 +1661,7 @@ bool WasmCompileFuzzer::GenerateModule(
     WasmFunctionBuilder* f = builder.AddFunction(sig);
 
     WasmGenerator gen(f, function_signatures, globals, mutable_globals,
-                      &function_range);
+                      &function_range, max);
     if (sig->return_count() == 0) {
       gen.Generate(kWasmStmt, &function_range);
     }

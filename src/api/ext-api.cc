@@ -1,3 +1,5 @@
+//#undef USING_V8_SHARED // Suddenly breaks because of recent development of cppgc
+#define STOP_USING_V8_SHARED
 #include "src/api/api.h"
 #include "src/api/api-inl.h"
 #include "src/api/ext-api.h"
@@ -37,6 +39,11 @@ namespace {
     UNREACHABLE();
     return E::Void;
   }
+
+  struct GlobalEntry {
+    v8::ext::WasmType type;
+    i::Handle<i::WasmGlobalObject> global_object;
+  };
 }
 
 void v8::ext::HelloDarling() {
@@ -58,10 +65,14 @@ struct v8::ext::CompiledWasmFunction::Internal {
   }
 };
 
+
+
 struct v8::ext::CompiledWasm::Internal {
   i::Handle<i::WasmModuleObject> module_object { i::Handle<i::WasmModuleObject>::null() };
   i::Handle<i::WasmInstanceObject> module_instance { i::Handle<i::WasmInstanceObject>::null() };
   i::Handle<i::WasmMemoryObject> wasm_memory_object { i::Handle<i::WasmMemoryObject>::null() };
+  std::map<std::string, GlobalEntry> wasm_global_list;
+  bool global_import_available { false };
 };
 
 void v8::ext::CompiledWasmFunction::Reattach(CompiledWasm& parent) {
@@ -253,6 +264,44 @@ v8::ext::CompiledWasmFunction& v8::ext::CompiledWasm::AddOneFunction() {
   return this->functions.back();
 }
 
+void v8::ext::CompiledWasm::NewGlobalImport(v8::Isolate* i) {
+  if(this->internal->global_import_available)
+    return; // Already imported
+
+  i::wasm::WasmModule const* wasm_module = this->internal->module_object->module();
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(i);
+
+  // Iterate all global imports
+  for(auto& import : wasm_module->import_table) {
+    if(import.kind == i::wasm::kExternalGlobal) {
+      i::wasm::ModuleWireBytes module_bytes(this->internal->module_object->native_module()->wire_bytes());
+      auto name_bytes = module_bytes.GetNameOrNull(import.field_name);
+      std::string global_name { name_bytes.begin(), name_bytes.end() };
+      
+      // Iterate the WasmGlobal list in the module
+      i::wasm::WasmGlobal const* global = nullptr;
+      for(auto& global_i : wasm_module->globals) {
+        if(global_i.index == import.index) {
+          global = &global_i;
+          break;
+        }
+      }
+
+      CHECK(global != nullptr);
+      auto global_type = ExtTyFromInternalTy(global->type.kind());
+      this->globals.emplace(global_name, global_type);
+      this->internal->wasm_global_list.emplace(
+            std::move(global_name), 
+            GlobalEntry { 
+              global_type,
+              i::WasmGlobalObject::New(isolate, {}, {}, global->type,
+                         0, global->mutability).ToHandleChecked()});
+    }
+  }
+
+  this->internal->global_import_available = true;
+}
+
 void v8::ext::CompiledWasm::NewMemoryImport(v8::Isolate* i) {
   i::wasm::WasmModule const* wasm_module = this->internal->module_object->module();
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(i);
@@ -271,6 +320,43 @@ void v8::ext::CompiledWasm::NewMemoryImport(v8::Isolate* i) {
   auto wasm_memory_object = i::WasmMemoryObject::New(isolate, array_buffer_mem, maximum_pages);
 
   this->internal->wasm_memory_object = wasm_memory_object;
+}
+
+void v8::ext::CompiledWasm::SetGlobalImport(std::string const& name, WasmGlobalArg value) {
+  auto& global_list = this->internal->wasm_global_list;
+  auto global_iter = global_list.find(name);
+  if(global_iter != global_list.end()) {
+    using E = v8::ext::WasmType;
+    auto& global_ = global_iter->second;
+    switch(global_.type) {
+      case E::I32: global_.global_object->SetI32(value.i32); break;
+      case E::I64: global_.global_object->SetI64(value.i64); break;
+      case E::F32: global_.global_object->SetF32(value.f32); break;
+      case E::F64: global_.global_object->SetF64(value.f64); break;
+      case E::Void: UNREACHABLE();
+    }
+  }
+}
+
+auto v8::ext::CompiledWasm::GetGlobalImport(std::string const& name)
+      -> std::pair<WasmType, WasmGlobalArg> {
+  using E = v8::ext::WasmType;
+  WasmGlobalArg value;
+  auto& global_list = this->internal->wasm_global_list;
+  auto global_iter = global_list.find(name);
+  if(global_iter != global_list.end()) {
+    
+    auto& global_ = global_iter->second;
+    switch(global_.type) {
+      case E::I32: value.i32 = global_.global_object->GetI32(); break;
+      case E::I64: value.i64 = global_.global_object->GetI64(); break;
+      case E::F32: value.f32 = global_.global_object->GetF32(); break;
+      case E::F64: value.f64 = global_.global_object->GetF64(); break;
+      case E::Void: UNREACHABLE();
+    }
+    return std::make_pair(global_.type, value);
+  }
+  return std::make_pair(E::Void, value);
 }
 
 v8::ext::CompiledWasm::WasmMemoryRef v8::ext::CompiledWasm::GetWasmMemory() {
@@ -313,6 +399,10 @@ bool v8::ext::CompiledWasm::InstantiateWasm(Isolate* i) {
 
   // Construct the module import if any
   i::Handle<i::JSObject> values = i::Handle<i::JSObject>::null();
+  values = isolate->factory()->NewJSObjectWithNullProto();
+  i::Handle<i::JSObject> module_value = isolate->factory()->NewJSObjectWithNullProto();
+  i::JSObject::AddProperty(isolate, values, "", module_value, i::PropertyAttributes::NONE); // MODULE NAME IS ASSUMED NULL AT THE MOMENT
+    
   auto res = FindImportedMemory(this->internal->module_object);
   if(std::get<0>(res)) {
     if(this->internal->wasm_memory_object.is_null()) {
@@ -320,11 +410,14 @@ bool v8::ext::CompiledWasm::InstantiateWasm(Isolate* i) {
       return false;
     }
 
-    values = isolate->factory()->NewJSObjectWithNullProto();
-    i::Handle<i::JSObject> module_value = isolate->factory()->NewJSObjectWithNullProto();
     i::Handle<i::JSObject> mem_import_values = this->internal->wasm_memory_object;
-    i::JSObject::AddProperty(isolate, values, "", module_value, i::PropertyAttributes::NONE); // MODULE NAME IS ASSUMED NULL AT THE MOMENT
     i::JSObject::AddProperty(isolate, module_value, std::get<1>(res).c_str(), mem_import_values, i::PropertyAttributes::NONE);
+  }
+
+  // Import globals
+  for(auto& global : this->internal->wasm_global_list) {
+    i::Handle<i::JSObject> global_import_value = global.second.global_object;
+    i::JSObject::AddProperty(isolate, module_value, global.first.c_str(), global_import_value, i::PropertyAttributes::NONE);
   }
 
   // Instantiate the module
