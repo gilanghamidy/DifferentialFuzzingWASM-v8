@@ -1618,8 +1618,8 @@ bool WasmCompileFuzzer::GenerateModule(
   //function_signatures.push_back(sigs.i_iii());
 
   // Setting memory configuration
-  uint16_t min = (range.get<uint16_t>() % 1024) + 1; // Maximum is 1024 pages or 64MB
-  uint16_t max = std::max((uint16_t)(range.get<uint16_t>() % 1024 + 1), min);
+  uint8_t min = 10; //(range.get<uint8_t>() % 10) + 1; // Maximum is 10 pages or 640Kb
+  uint8_t max = 20; //std::max((uint8_t)(range.get<uint8_t>() % 10 + 1), min);
   builder.SetMinMemorySize(min);
   builder.SetMaxMemorySize(max);
 
@@ -1636,11 +1636,18 @@ bool WasmCompileFuzzer::GenerateModule(
   globals.reserve(num_globals);
   mutable_globals.reserve(num_globals);
 
+  std::list<std::string> globalNames;
+
   for (int i = 0; i < num_globals; ++i) {
     ValueType type = GetValueType(&range);
     // 1/8 of globals are immutable.
-    const bool mutability = (range.get<uint8_t>() % 8) != 0;
-    builder.AddGlobal(type, mutability, WasmInitExpr());
+    const bool mutability = true;//(range.get<uint8_t>() % 8) != 0;
+    //builder.AddGlobal(type, mutability, WasmInitExpr());
+    std::string newGlobalName { "global" }; 
+    newGlobalName += std::to_string(i);
+    globalNames.emplace_back(std::move(newGlobalName));
+
+    builder.AddGlobalImport(CStrVector(globalNames.back().c_str()), type, mutability, CStrVector(""));
     globals.push_back(type);
     if (mutability) mutable_globals.push_back(static_cast<uint8_t>(i));
   }
@@ -1652,7 +1659,7 @@ bool WasmCompileFuzzer::GenerateModule(
     newFuncName += std::to_string(i);     
     funcNames.emplace_back(std::move(newFuncName));
     auto& funcName = funcNames.back();
-    std::cout << "Generating " << funcName << "\n";
+    //std::cout << "Generating " << funcName << "\n";
 
     DataRange function_range =
         i == num_functions - 1 ? std::move(range) : range.split();

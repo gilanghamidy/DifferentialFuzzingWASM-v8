@@ -19,7 +19,7 @@
 #include <iostream>
 #include <algorithm>
 #include <string>
-
+#include <chrono>
 namespace i = v8::internal;
 
 namespace { 
@@ -141,7 +141,8 @@ std::vector<uint8_t> v8::ext::CompiledWasmFunction::Instructions() const {
   return ret;
 }
 
-v8::MaybeLocal<v8::Value> V8_EXPORT v8::ext::CompiledWasmFunction::Invoke(v8::Isolate* i, std::vector<Local<Value>>& args) const {
+auto V8_EXPORT v8::ext::CompiledWasmFunction::Invoke(v8::Isolate* i, std::vector<Local<Value>>& args) const
+  -> std::tuple<MaybeLocal<Value>, uint64_t> {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(i);
   
   // Check if the function is available
@@ -154,13 +155,19 @@ v8::MaybeLocal<v8::Value> V8_EXPORT v8::ext::CompiledWasmFunction::Invoke(v8::Is
       this->internal->function_handle = the_function;
     } else {
       std::cerr << "ERROR: Module is not instantiated.\n";
-      return { };
+      return { MaybeLocal<Value>{}, 0 };
     }
   }
 
   i::Handle<i::Object> undefined = isolate->factory()->undefined_value();
+
+  std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
   i::MaybeHandle<i::Object> retval =
       i::Execution::Call(isolate, this->internal->function_handle, undefined, (int) args.size(), reinterpret_cast<i::Handle<i::Object>*>(args.data()));
+  std::chrono::steady_clock::time_point end_time = std::chrono::steady_clock::now();
+  
+  uint64_t elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time).count();
+    
   // The result should be a number.
   if (retval.is_null()) {
     //DCHECK(isolate->has_pending_exception());
@@ -170,19 +177,19 @@ v8::MaybeLocal<v8::Value> V8_EXPORT v8::ext::CompiledWasmFunction::Invoke(v8::Is
 
     char buf[1000];
     result->WriteUtf8(i, buf, sizeof(buf));
-    printf("%s\n", buf);
+    //fprintf(stderr, "%s\n", buf);
 
     isolate->clear_pending_exception();
     //thrower.RuntimeError("Calling exported wasm function failed.");
-    return { };
+    return { MaybeLocal<Value> {}, elapsed };
   }
 
   v8::Local<v8::Value> result;
   if(!v8::ToLocal(retval, &result)) {
-    return { };
+    return { MaybeLocal<Value> {}, elapsed };
   }
 
-  return result;
+  return { result, elapsed };
 }
 
 

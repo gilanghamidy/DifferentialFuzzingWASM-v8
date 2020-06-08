@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <tuple>
 namespace v8 {
 namespace ext {
 
@@ -57,7 +58,7 @@ public:
   std::string const& Name() const noexcept { return name; }
 
   V8_EXPORT ~CompiledWasmFunction();
-  MaybeLocal<Value> V8_EXPORT Invoke(Isolate* i, std::vector<Local<Value>>& args) const;
+  std::tuple<MaybeLocal<Value>, uint64_t> V8_EXPORT Invoke(Isolate* i, std::vector<Local<Value>>& args) const;
   std::vector<uint8_t> V8_EXPORT Instructions() const;
 };
 
