@@ -132,6 +132,9 @@ std::vector<uint8_t> v8::ext::CompiledWasmFunction::Instructions() const {
   auto wasm_code = this->parent.get().internal
                     ->module_object->native_module()
                     ->GetCode(this->func_index);
+
+  // Update the address
+  this->instruction_address = wasm_code->instruction_start();
   
   // Marshall out the data
   std::vector<uint8_t> ret;
@@ -234,9 +237,16 @@ v8::Maybe<v8::ext::CompiledWasm> v8::ext::CompileBinaryWasm(v8::Isolate* i, cons
       auto name = module_bytes.GetNameOrNull(exported.name);
       ret.function_names.emplace(std::string { name.data(), name.length() }, exported.index);
 
+      
+
       CompiledWasmFunction& func = ret.AddOneFunction();
       func.name = std::string { name.data(), name.length() };
       func.func_index = exported.index;
+
+      i::wasm::WasmCodeRefScope ref_scope;
+      auto wasm_code = compiled_module->native_module()
+                                      ->GetCode(exported.index);
+      func.instruction_address = wasm_code->instruction_start();
       func.internal->function_handle = decltype(func.internal->function_handle)::null(); //the_function;
     }
 

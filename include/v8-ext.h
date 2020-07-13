@@ -38,6 +38,7 @@ class V8_EXPORT CompiledWasmFunction {
   uint32_t func_index;
   std::reference_wrapper<CompiledWasm> parent;
   std::string name;
+  mutable intptr_t instruction_address;
 
   friend Maybe<CompiledWasm> v8::ext::CompileBinaryWasm(Isolate* i, const uint8_t* arr, size_t len);
   friend class CompiledWasm;
@@ -56,6 +57,7 @@ public:
   std::vector<WasmType> Parameters() const;
 
   std::string const& Name() const noexcept { return name; }
+  intptr_t InstructionAddress() const noexcept { return instruction_address; }
 
   V8_EXPORT ~CompiledWasmFunction();
   std::tuple<MaybeLocal<Value>, uint64_t> V8_EXPORT Invoke(Isolate* i, std::vector<Local<Value>>& args) const;
